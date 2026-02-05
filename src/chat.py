@@ -50,9 +50,16 @@ class RAGChatbot:
         try:
             # List available models
             models = ollama.list()
-            model_names = [m['name'] for m in models.get('models', [])]
+            model_names = [m.get('name', '') for m in models.get('models', [])]
             
-            if self.model not in model_names and f"{self.model}:latest" not in model_names:
+            # Check if our model exists (with or without :latest tag)
+            model_found = False
+            for name in model_names:
+                if name == self.model or name == f"{self.model}:latest" or name.startswith(f"{self.model}:"):
+                    model_found = True
+                    break
+            
+            if not model_found:
                 console.print(f"[yellow]⚠️  Model '{self.model}' not found[/yellow]")
                 console.print(f"[yellow]Available models: {', '.join(model_names)}[/yellow]")
                 console.print(f"\n[cyan]To install: ollama pull {self.model}[/cyan]\n")

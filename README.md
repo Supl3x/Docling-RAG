@@ -20,10 +20,11 @@ PDFs → Docling (OCR) → SentenceTransformers (embeddings) → FAISS (vector D
 ## 📦 Tech Stack
 
 - **Docling**: PDF processing with automatic OCR
-- **SentenceTransformers**: Semantic embeddings
+- **SentenceTransformers**: Semantic embeddings (PyTorch-based)
 - **FAISS**: Vector similarity search
 - **Ollama + Phi-3**: Local LLM inference
 - **Rich**: Beautiful terminal UI
+- **PyTorch**: Deep learning framework (GPU-accelerated)
 
 ## 🚀 Quick Start
 
@@ -116,11 +117,17 @@ Edit these parameters in the code:
 
 ## 📊 Performance
 
-On a typical laptop:
+On a typical laptop (CPU only):
 - **OCR**: 2-5 seconds/page
 - **Embedding**: 100-500ms/chunk
 - **Search**: <50ms
-- **LLM response**: 2-10 seconds
+- **LLM response**: 5-15 seconds
+
+With NVIDIA GPU (CUDA-enabled):
+- **OCR**: 0.5-2 seconds/page
+- **Embedding**: 20-100ms/chunk
+- **Search**: <50ms
+- **LLM response**: 1-3 seconds (via Ollama GPU acceleration)
 
 ## 🆚 Cost Comparison
 
@@ -133,6 +140,13 @@ On a typical laptop:
 
 ## 🛠️ Troubleshooting
 
+**TensorFlow DLL Error (Windows)**: 
+- Uninstall TensorFlow: `pip uninstall tensorflow -y`
+- System uses PyTorch only (no TensorFlow needed)
+
+**SSL Certificate Error**: 
+- Fixed automatically with SSL bypass for Windows
+
 **No PDFs found**: Add `.pdf` files to `data/pdfs/`
 
 **OCR fails**: Ensure scans are clear and readable
@@ -140,6 +154,12 @@ On a typical laptop:
 **Ollama error**: Check if Ollama service is running
 
 **Out of memory**: Reduce chunk size or use smaller embedding model
+
+**Slow responses (CPU)**: Install PyTorch with CUDA for GPU acceleration:
+```bash
+pip uninstall torch torchvision torchaudio -y
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
 
 ## 🤝 Contributing
 

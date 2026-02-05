@@ -1,3 +1,7 @@
+# MUST be set before any imports to avoid TensorFlow DLL issues
+import os
+os.environ['TRANSFORMERS_NO_TF'] = '1'
+
 """
 Vector Retrieval Engine - Searches vector database for relevant content
 

@@ -1,3 +1,12 @@
+# MUST be set before any imports to avoid TensorFlow DLL issues
+import os
+os.environ['TRANSFORMERS_NO_TF'] = '1'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
+# Fix SSL certificate issues on Windows
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
 """
 PDF Ingestion Pipeline - Processes PDFs into searchable vector database
 
@@ -5,7 +14,6 @@ Flow:
     PDF → Docling (OCR + extraction) → Text chunks → Embeddings → FAISS index
 """
 
-import os
 import pickle
 from pathlib import Path
 from typing import List, Dict, Tuple

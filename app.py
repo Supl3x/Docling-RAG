@@ -1,3 +1,8 @@
+# MUST be set before any imports to avoid TensorFlow DLL issues
+import os
+os.environ['TRANSFORMERS_NO_TF'] = '1'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 """
 DOCLING RAG - Complete Document Q&A System
 
