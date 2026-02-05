@@ -1,0 +1,23 @@
+# Document processing with OCR
+docling~=2.7.0
+
+# Embeddings (text → vectors)
+sentence-transformers>=3.0.0
+
+# Vector database (local, free)
+faiss-cpu>=1.13.2
+
+# LLM interface
+ollama>=0.4.0
+
+# Deep learning framework
+torch>=2.5.0
+
+# Pretty terminal output
+rich>=13.9.0
+
+# Utilities
+numpy>=1.26.0
+pandas==2.1.4
+tqdm==4.66.1
+python-dotenv==1.0.0
