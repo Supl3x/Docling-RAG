@@ -50,7 +50,18 @@ class DoclingRAGApp:
         
         checks = []
         
-        # Check 1: Index exists
+        # Check 1: GPU availability
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                checks.append(("GPU", f"✓ {gpu_name}", "green"))
+            else:
+                checks.append(("GPU", "✗ Not available (CPU mode)", "yellow"))
+        except:
+            checks.append(("GPU", "✗ PyTorch not installed", "yellow"))
+        
+        # Check 2: Index exists
         index_path = Path("index/faiss.index")
         if index_path.exists():
             checks.append(("Index", "✓", "green"))
@@ -59,7 +70,7 @@ class DoclingRAGApp:
             checks.append(("Index", "✗ Not found", "yellow"))
             self.index_exists = False
         
-        # Check 2: PDFs exist
+        # Check 3: PDFs exist
         pdf_folder = Path("data/pdfs")
         pdf_count = len(list(pdf_folder.glob("*.pdf"))) if pdf_folder.exists() else 0
         if pdf_count > 0:
@@ -67,8 +78,34 @@ class DoclingRAGApp:
         else:
             checks.append(("PDFs", "✗ None found", "yellow"))
         
-        # Check 3: Ollama (will be checked when initializing chatbot)
-        checks.append(("Ollama", "⏳ Checking...", "cyan"))
+        # Check 4: Ollama and phi3 model
+        try:
+            import ollama
+            result = ollama.list()
+            models = result.get('models', []) if isinstance(result, dict) else result.models if hasattr(result, 'models') else []
+            
+            if not models:
+                checks.append(("Ollama/phi3", "⚠️ No models found", "yellow"))
+            else:
+                # Extract model names (handle both dict and object formats)
+                model_names = []
+                for m in models:
+                    if isinstance(m, dict):
+                        model_names.append(m.get('name', m.get('model', '')))
+                    else:
+                        model_names.append(getattr(m, 'name', getattr(m, 'model', '')))
+                
+                # Check for phi3 model (any variant)
+                phi3_found = any('phi3' in str(name).lower() for name in model_names if name)
+                
+                if phi3_found:
+                    checks.append(("Ollama/phi3", "✓ Ready", "green"))
+                else:
+                    checks.append(("Ollama/phi3", f"✗ Model not found", "yellow"))
+                    if model_names:
+                        console.print(f"[dim]  Available: {', '.join(str(n) for n in model_names[:3])}[/dim]")
+        except Exception as e:
+            checks.append(("Ollama/phi3", f"✗ Error: {str(e)[:30]}", "red"))
         
         # Display checks
         table = Table(show_header=True, header_style="bold cyan")
@@ -167,13 +204,16 @@ class DoclingRAGApp:
                 if not question.strip():
                     continue
                 
-                # Retrieve relevant chunks
+                # Retrieve more chunks initially, let chatbot filter by relevance
                 console.print("\n[dim]🔍 Searching documents...[/dim]")
-                results = self.retriever.retrieve(question, top_k=5)
+                results = self.retriever.retrieve(question, top_k=7)
                 
                 if not results:
                     console.print("[yellow]⚠️  No relevant information found.[/yellow]")
                     continue
+                
+                # Show retrieval stats
+                console.print(f"[dim]Found {len(results)} chunks (best: {results[0]['score']:.0%} relevance)[/dim]")
                 
                 # Generate answer
                 result = self.chatbot.chat(
@@ -182,6 +222,10 @@ class DoclingRAGApp:
                     stream=True,
                     show_context=False
                 )
+                
+                # Display the answer if not already streamed
+                if not result.get('answer'):
+                    console.print("[red]⚠️  No answer generated[/red]")
                 
                 # Show sources
                 if result['sources']:

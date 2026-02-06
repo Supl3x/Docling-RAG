@@ -48,8 +48,9 @@ class PDFIngestor:
         self,
         pdf_folder: str = "data/pdfs",
         index_folder: str = "index",
-        embedding_model: str = "all-MiniLM-L6-v2",  # Fast, 384-dim embeddings
-        chunk_size: int = 500  # Characters per chunk
+        embedding_model: str = "BAAI/bge-small-en-v1.5",  # Better retrieval quality, 384-dim, lightweight
+        chunk_size: int = 1200,  # Balanced size for good context and precision
+        chunk_overlap: int = 200  # Overlap to preserve context across chunks
     ):
         """
         Initialize the PDF ingestor.
@@ -63,6 +64,7 @@ class PDFIngestor:
         self.pdf_folder = Path(pdf_folder)
         self.index_folder = Path(index_folder)
         self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
         
         # Create folders if they don't exist
         self.pdf_folder.mkdir(parents=True, exist_ok=True)
@@ -70,7 +72,18 @@ class PDFIngestor:
         
         # Initialize components
         console.print(f"[cyan]Loading embedding model: {embedding_model}...[/cyan]")
-        self.embedder = SentenceTransformer(embedding_model)
+        
+        # Detect and use GPU if available
+        import torch
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if self.device == 'cuda':
+            console.print(f"[green]✓ GPU detected: {torch.cuda.get_device_name(0)}[/green]")
+            # Enable GPU optimizations
+            torch.backends.cudnn.benchmark = True
+        else:
+            console.print("[yellow]⚠️  No GPU detected, using CPU[/yellow]")
+        
+        self.embedder = SentenceTransformer(embedding_model, device=self.device)
         
         # Docling converter (handles OCR automatically)
         self.converter = DocumentConverter()
@@ -142,51 +155,128 @@ class PDFIngestor:
     
     def _chunk_text(self, text: str) -> List[str]:
         """
-        Split text into chunks with overlap for better context.
+        Split text into semantic chunks preserving tables and structure.
         
         Args:
-            text: Full document text
+            text: Full document text (markdown format)
             
         Returns:
             List of text chunks
         """
         chunks = []
-        overlap = int(self.chunk_size * 0.2)  # 20% overlap
         
-        # Split into paragraphs first (preserves structure)
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        # First, identify and protect tables/structured data
+        lines = text.split('\n')
+        segments = []
+        current_segment = []
+        in_table = False
         
-        current_chunk = ""
-        
-        for para in paragraphs:
-            # If paragraph alone is too big, split it
-            if len(para) > self.chunk_size:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                    current_chunk = ""
-                
-                # Split large paragraph
-                words = para.split()
-                for word in words:
-                    if len(current_chunk) + len(word) > self.chunk_size:
-                        chunks.append(current_chunk)
-                        # Keep overlap
-                        current_chunk = ' '.join(current_chunk.split()[-overlap:]) + ' ' + word
-                    else:
-                        current_chunk += ' ' + word if current_chunk else word
+        for line in lines:
+            # Detect table rows (markdown tables have | characters)
+            is_table_line = '|' in line and line.strip().startswith('|')
+            
+            if is_table_line and not in_table:
+                # Starting a table - save current segment first
+                if current_segment:
+                    segments.append(('text', '\n'.join(current_segment)))
+                    current_segment = []
+                in_table = True
+                current_segment = [line]
+            elif is_table_line and in_table:
+                # Continue table
+                current_segment.append(line)
+            elif not is_table_line and in_table:
+                # End of table
+                segments.append(('table', '\n'.join(current_segment)))
+                current_segment = [line] if line.strip() else []
+                in_table = False
             else:
-                # Add paragraph to chunk
-                if len(current_chunk) + len(para) > self.chunk_size:
-                    chunks.append(current_chunk)
-                    current_chunk = para
-                else:
-                    current_chunk += '\n\n' + para if current_chunk else para
+                # Regular text
+                current_segment.append(line)
         
-        # Don't forget the last chunk
-        if current_chunk:
-            chunks.append(current_chunk)
+        # Don't forget last segment
+        if current_segment:
+            segment_type = 'table' if in_table else 'text'
+            segments.append((segment_type, '\n'.join(current_segment)))
+        
+        # Now chunk each segment appropriately
+        for seg_type, content in segments:
+            if not content.strip():
+                continue
+                
+            if seg_type == 'table':
+                # Keep tables intact - don't split them
+                # But if table is huge, split by rows
+                if len(content) > self.chunk_size * 2:
+                    table_lines = content.split('\n')
+                    header = table_lines[:2] if len(table_lines) > 2 else table_lines[:1]
+                    header_text = '\n'.join(header)
+                    
+                    current_table_chunk = header_text
+                    for row in table_lines[len(header):]:
+                        if len(current_table_chunk) + len(row) > self.chunk_size:
+                            chunks.append(current_table_chunk)
+                            current_table_chunk = header_text + '\n' + row
+                        else:
+                            current_table_chunk += '\n' + row
+                    if current_table_chunk:
+                        chunks.append(current_table_chunk)
+                else:
+                    chunks.append(content)
+            else:
+                # Regular text - chunk with overlap
+                self._chunk_regular_text(content, chunks)
         
         return chunks
+    
+    def _chunk_regular_text(self, text: str, chunks: List[str]):
+        """
+        Chunk regular text with sentence-aware boundaries and proper overlap.
+        
+        Uses self.chunk_overlap to carry context between chunks.
+        
+        Args:
+            text: Text to chunk
+            chunks: List to append chunks to
+        """
+        import re
+        
+        # Split into sentences - require capital letter after punctuation
+        # to avoid splitting on abbreviations like "Dr.", "U.S.", "3.14"
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+        
+        current_chunk = ""
+        previous_sentences = []  # Track sentences for overlap
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            if len(current_chunk) + len(sentence) + 1 > self.chunk_size and current_chunk:
+                chunks.append(current_chunk.strip())
+                
+                # Build overlap from previous sentences up to chunk_overlap chars
+                overlap = ""
+                for prev in reversed(previous_sentences):
+                    candidate = prev + " " + overlap if overlap else prev
+                    if len(candidate) <= self.chunk_overlap:
+                        overlap = candidate
+                    else:
+                        break
+                
+                current_chunk = overlap + " " + sentence if overlap else sentence
+                previous_sentences = [sentence]
+            elif not current_chunk and len(sentence) > self.chunk_size:
+                # Single sentence too long - add it as-is
+                chunks.append(sentence)
+                previous_sentences = []
+            else:
+                current_chunk += " " + sentence if current_chunk else sentence
+                previous_sentences.append(sentence)
+        
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
     
     def create_embeddings(self) -> np.ndarray:
         """
@@ -199,13 +289,18 @@ class PDFIngestor:
             console.print("[yellow]⚠️  No chunks to embed[/yellow]")
             return np.array([])
         
-        console.print(f"[cyan]Creating embeddings for {len(self.chunks)} chunks...[/cyan]")
+        console.print(f"[cyan]Creating embeddings for {len(self.chunks)} chunks on {self.device.upper()}...[/cyan]")
         
-        # Convert chunks to vectors (this is where the magic happens!)
+        # Convert chunks to vectors with GPU optimization
+        # Use batch_size for better GPU utilization
+        batch_size = 32 if self.device == 'cuda' else 16  # Reduced for 2GB VRAM
+        
         embeddings = self.embedder.encode(
             self.chunks,
             show_progress_bar=True,
-            convert_to_numpy=True
+            convert_to_numpy=True,
+            batch_size=batch_size,
+            normalize_embeddings=True  # Normalize for cosine similarity
         )
         
         console.print(
@@ -233,11 +328,11 @@ class PDFIngestor:
         # Get embedding dimension
         dimension = embeddings.shape[1]
         
-        # Create FAISS index (L2 distance for similarity)
-        # IndexFlatL2 = brute force, exact search (good for small datasets)
-        index = faiss.IndexFlatL2(dimension)
+        # Use Inner Product (cosine similarity on normalized vectors) for better accuracy
+        # IndexFlatIP = brute force, exact search with inner product
+        index = faiss.IndexFlatIP(dimension)
         
-        # Add vectors to index
+        # Add vectors to index (already normalized)
         index.add(embeddings.astype('float32'))
         
         console.print(

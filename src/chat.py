@@ -28,7 +28,8 @@ class RAGChatbot:
         self,
         model: str = "phi3",  # Ollama model name
         temperature: float = 0.1,  # Low = more focused, high = more creative
-        max_tokens: int = 500  # Maximum response length
+        max_tokens: int = 1000,  # Maximum response length
+        min_relevance_score: float = 0.35  # Balanced threshold for quality
     ):
         """
         Initialize the RAG chatbot.
@@ -37,10 +38,12 @@ class RAGChatbot:
             model: Ollama model name (e.g., 'llama3', 'mistral', 'phi')
             temperature: Sampling temperature (0.0-1.0)
             max_tokens: Maximum tokens in response
+            min_relevance_score: Minimum score to include a chunk in context
         """
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.min_relevance_score = min_relevance_score
         
         # Check if Ollama is available
         self._check_ollama()
@@ -49,19 +52,27 @@ class RAGChatbot:
         """Check if Ollama is running and model is available."""
         try:
             # List available models
-            models = ollama.list()
-            model_names = [m.get('name', '') for m in models.get('models', [])]
+            result = ollama.list()
+            models = result.get('models', []) if isinstance(result, dict) else result.models if hasattr(result, 'models') else []
+            
+            # Extract model names
+            model_names = []
+            for m in models:
+                if isinstance(m, dict):
+                    model_names.append(m.get('name', m.get('model', '')))
+                else:
+                    model_names.append(getattr(m, 'name', getattr(m, 'model', '')))
             
             # Check if our model exists (with or without :latest tag)
             model_found = False
             for name in model_names:
-                if name == self.model or name == f"{self.model}:latest" or name.startswith(f"{self.model}:"):
+                if name and (name == self.model or name == f"{self.model}:latest" or name.startswith(f"{self.model}:")):
                     model_found = True
                     break
             
             if not model_found:
                 console.print(f"[yellow]⚠️  Model '{self.model}' not found[/yellow]")
-                console.print(f"[yellow]Available models: {', '.join(model_names)}[/yellow]")
+                console.print(f"[yellow]Available models: {', '.join(str(n) for n in model_names if n)}[/yellow]")
                 console.print(f"\n[cyan]To install: ollama pull {self.model}[/cyan]\n")
             else:
                 console.print(f"[green]✓ Ollama model '{self.model}' ready[/green]")
@@ -92,10 +103,15 @@ class RAGChatbot:
         """
         if system_message is None:
             system_message = (
-                "You are a helpful AI assistant that answers questions based on provided context. "
-                "IMPORTANT: Only use information from the context below. "
-                "If the answer is not in the context, say 'I cannot answer this based on the provided documents.' "
-                "Be concise, accurate, and cite sources when possible."
+                "You are an AI assistant that answers questions using ONLY the provided context.\n\n"
+                "STRICT RULES:\n"
+                "1. Answer ONLY using information from the CONTEXT section below\n"
+                "2. If the context contains tables, marks, numbers, or data - quote them EXACTLY as shown\n"
+                "3. If asked about specific names, numbers, or values - look for EXACT matches in the context\n"
+                "4. Do NOT make up, infer, or add any information not present in the context\n"
+                "5. If the answer is not in the context, say: 'This information is not found in the document.'\n"
+                "6. When presenting data from tables, format it clearly and cite the source\n"
+                "7. Be concise and direct - do not add unnecessary explanations"
             )
         
         prompt = f"""{system_message}
@@ -126,51 +142,71 @@ ANSWER:"""
         Returns:
             Generated answer
         """
-        # Create the prompt
-        prompt = self.create_prompt(question, context)
+        # Build chat messages with proper system/user roles for better comprehension
+        system_message = (
+            "You are an AI assistant that answers questions using ONLY the provided context.\n\n"
+            "STRICT RULES:\n"
+            "1. Answer ONLY using information from the CONTEXT provided by the user\n"
+            "2. If the context contains tables, numbers, or data - quote them EXACTLY\n"
+            "3. If asked about specific names, numbers, or values - look for EXACT matches\n"
+            "4. Do NOT make up or infer information not in the context\n"
+            "5. If the answer is not in the context, say: 'This information is not found in the document.'\n"
+            "6. Be concise and direct"
+        )
+        
+        user_content = f"CONTEXT:\n{context}\n\nQUESTION: {question}\n\nProvide a direct answer based only on the context above."
+        
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_content}
+        ]
         
         try:
             if stream:
-                return self._generate_streaming(prompt)
+                return self._generate_streaming(messages)
             else:
-                return self._generate_standard(prompt)
+                return self._generate_standard(messages)
                 
         except Exception as e:
             error_msg = f"Error generating answer: {str(e)}"
             console.print(f"[red]{error_msg}[/red]")
             return error_msg
     
-    def _generate_standard(self, prompt: str) -> str:
-        """Generate answer without streaming."""
-        response = ollama.generate(
+    def _generate_standard(self, messages: list) -> str:
+        """Generate answer without streaming using chat API."""
+        response = ollama.chat(
             model=self.model,
-            prompt=prompt,
+            messages=messages,
             options={
                 'temperature': self.temperature,
-                'num_predict': self.max_tokens
+                'num_predict': self.max_tokens,
+                'num_gpu': 15,  # Limit GPU layers for 2GB VRAM
+                'num_thread': 4
             }
         )
         
-        return response['response'].strip()
+        return response['message']['content'].strip()
     
-    def _generate_streaming(self, prompt: str) -> str:
-        """Generate answer with streaming output."""
+    def _generate_streaming(self, messages: list) -> str:
+        """Generate answer with streaming output using chat API."""
         console.print("\n[bold cyan]💬 Answer:[/bold cyan]\n")
         
         full_response = ""
         
-        stream = ollama.generate(
+        stream = ollama.chat(
             model=self.model,
-            prompt=prompt,
+            messages=messages,
             stream=True,
             options={
                 'temperature': self.temperature,
-                'num_predict': self.max_tokens
+                'num_predict': self.max_tokens,
+                'num_gpu': 15,  # Limit GPU layers for 2GB VRAM
+                'num_thread': 4
             }
         )
         
         for chunk in stream:
-            text = chunk['response']
+            text = chunk['message']['content']
             full_response += text
             console.print(text, end='')
         
@@ -209,12 +245,29 @@ ANSWER:"""
                 'sources': []
             }
         
-        # Format context from retrieved results
+        # Filter by minimum relevance score for better quality
+        filtered_results = [
+            r for r in retrieved_results 
+            if r['score'] >= self.min_relevance_score
+        ]
+        
+        if not filtered_results:
+            return {
+                'question': question,
+                'context': '',
+                'answer': "No sufficiently relevant information was found in the documents for this question. Try rephrasing or asking about a different topic covered in your PDFs.",
+                'sources': []
+            }
+        
+        # Format context from filtered results (only top relevant chunks)
         context_parts = []
         sources = []
         
-        for i, result in enumerate(retrieved_results, 1):
-            context_parts.append(f"[Document {i}]\n{result['text']}")
+        # Limit to top 4 most relevant chunks to fit phi3 context window
+        top_results = filtered_results[:4]
+        
+        for i, result in enumerate(top_results, 1):
+            context_parts.append(f"[Document {i} - Relevance: {result['score']:.0%}]\n{result['text']}")
             sources.append({
                 'source': result['metadata']['source'],
                 'score': result['score']

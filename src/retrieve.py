@@ -38,7 +38,7 @@ class VectorRetriever:
     def __init__(
         self,
         index_folder: str = "index",
-        embedding_model: str = "all-MiniLM-L6-v2",  # Must match ingestion model
+        embedding_model: str = "BAAI/bge-small-en-v1.5",  # Must match ingestion model
         top_k: int = 5  # Number of results to return
     ):
         """
@@ -54,7 +54,18 @@ class VectorRetriever:
         
         # Load embedding model (same as used during ingestion)
         console.print(f"[cyan]Loading embedding model: {embedding_model}...[/cyan]")
-        self.embedder = SentenceTransformer(embedding_model)
+        
+        # Detect and use GPU if available
+        import torch
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if self.device == 'cuda':
+            console.print(f"[green]✓ GPU detected: {torch.cuda.get_device_name(0)}[/green]")
+            # Enable GPU optimizations
+            torch.backends.cudnn.benchmark = True
+        else:
+            console.print("[yellow]⚠️  No GPU detected, using CPU[/yellow]")
+        
+        self.embedder = SentenceTransformer(embedding_model, device=self.device)
         
         # Load FAISS index and metadata
         self.index = None
@@ -125,31 +136,37 @@ class VectorRetriever:
         k = min(k, self.index.ntotal)
         
         try:
-            # Convert query to embedding (same vector space as documents)
+            # Convert query to embedding with GPU optimization
+            # Add instruction prefix for BGE model (improves retrieval accuracy)
+            query_text = f"Represent this sentence for searching relevant passages: {query}"
+            
+            # Convert query to embedding with GPU optimization
+            # Normalize for cosine similarity (matching how chunks were embedded)
             query_embedding = self.embedder.encode(
-                [query],
-                convert_to_numpy=True
+                [query_text],
+                convert_to_numpy=True,
+                normalize_embeddings=True  # Must match ingestion
             )
             
             # Search FAISS index for similar vectors
-            # distances: L2 distances (lower = more similar)
+            # scores: Inner product scores (higher = more similar)
             # indices: positions in the index
-            distances, indices = self.index.search(
+            scores, indices = self.index.search(
                 query_embedding.astype('float32'),
                 k
             )
             
             # Build results
             results = []
-            for i, (idx, distance) in enumerate(zip(indices[0], distances[0])):
-                # Convert L2 distance to similarity score (0-1, higher = better)
-                # Using exponential decay: similarity = e^(-distance)
-                similarity_score = np.exp(-distance)
+            for i, (idx, score) in enumerate(zip(indices[0], scores[0])):
+                # Inner product on normalized vectors = cosine similarity (0 to 1)
+                # Clamp to valid range
+                similarity_score = max(0.0, min(1.0, float(score)))
                 
                 results.append({
                     'text': self.chunks[idx],
-                    'score': float(similarity_score),
-                    'distance': float(distance),
+                    'score': similarity_score,
+                    'distance': 1.0 - similarity_score,  # For backward compatibility
                     'metadata': self.metadata[idx],
                     'rank': i + 1
                 })
@@ -192,7 +209,8 @@ class VectorRetriever:
         self,
         results: List[Dict[str, any]],
         include_scores: bool = False,
-        include_sources: bool = True
+        include_sources: bool = True,
+        min_score: float = 0.35  # Filter out low relevance chunks
     ) -> str:
         """
         Format retrieved chunks into context string for LLM.
@@ -201,6 +219,7 @@ class VectorRetriever:
             results: Retrieved chunks from retrieve()
             include_scores: Show relevance scores
             include_sources: Show source document names
+            min_score: Minimum similarity score to include
             
         Returns:
             Formatted context string
@@ -208,9 +227,15 @@ class VectorRetriever:
         if not results:
             return "No relevant information found."
         
+        # Filter by minimum score for quality
+        filtered_results = [r for r in results if r['score'] >= min_score]
+        
+        if not filtered_results:
+            return "No sufficiently relevant information found."
+        
         context_parts = []
         
-        for result in results:
+        for result in filtered_results:
             # Build chunk header
             header_parts = []
             if include_sources:

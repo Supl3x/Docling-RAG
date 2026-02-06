@@ -20,7 +20,7 @@ PDFs → Docling (OCR) → SentenceTransformers (embeddings) → FAISS (vector D
 ## 📦 Tech Stack
 
 - **Docling**: PDF processing with automatic OCR
-- **SentenceTransformers**: Semantic embeddings (PyTorch-based)
+- **SentenceTransformers**: Semantic embeddings via BGE (PyTorch-based)
 - **FAISS**: Vector similarity search
 - **Ollama + Phi-3**: Local LLM inference
 - **Rich**: Beautiful terminal UI
@@ -32,6 +32,7 @@ PDFs → Docling (OCR) → SentenceTransformers (embeddings) → FAISS (vector D
 
 1. **Python 3.10+**
 2. **Ollama** - [Download here](https://ollama.com)
+3. **Minimum Hardware**: 8 GB RAM, 2 GB NVIDIA GPU (CPU-only mode also supported)
 
 ### Installation
 
